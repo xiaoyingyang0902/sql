@@ -19,8 +19,9 @@ HINT: keep the syntax the same, but edited the correct components with the strin
 The `||` values concatenate the columns into strings. 
 Edit the appropriate columns -- you're making two edits -- and the NULL rows will be fixed. 
 All the other rows will remain the same.) */
-
-
+SELECT 
+product_name || ', ' || COALESCE(product_size, ' ') || ' (' || COALESCE(product_qty_type, 'unit') || ')'
+FROM product
 
 --Windowed Functions
 /* 1. Write a query that selects from the customer_purchases table and numbers each customer’s  
@@ -31,19 +32,35 @@ You can either display all rows in the customer_purchases table, with the counte
 each new market date for each customer, or select only the unique market dates per customer 
 (without purchase details) and number those visits. 
 HINT: One of these approaches uses ROW_NUMBER() and one uses DENSE_RANK(). */
-
-
+SELECT 
+customer_id,
+market_date,
+ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS number_of_visit
+FROM customer_purchases
+GROUP BY customer_id, market_date
 
 /* 2. Reverse the numbering of the query from a part so each customer’s most recent visit is labeled 1, 
 then write another query that uses this one as a subquery (or temp table) and filters the results to 
 only the customer’s most recent visit. */
-
-
+SELECT *
+FROM
+(
+SELECT 
+customer_id,
+market_date,
+ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY market_date) AS number_of_visit
+FROM customer_purchases
+GROUP BY customer_id, market_date
+)x
+WHERE x.number_of_visit=1
 
 /* 3. Using a COUNT() window function, include a value along with each row of the 
 customer_purchases table that indicates how many different times that customer has purchased that product_id. */
-
-
+SELECT *,
+COUNT(product_id) OVER (PARTITION BY customer_id, product_id) AS
+product_purchase_count
+FROM customer_purchases 
+ORDER BY customer_id, product_id
 
 -- String manipulations
 /* 1. Some product names in the product table have descriptions like "Jar" or "Organic". 
@@ -56,12 +73,17 @@ Remove any trailing or leading whitespaces. Don't just use a case statement for 
 | Habanero Peppers - Organic | Organic     |
 
 Hint: you might need to use INSTR(product_name,'-') to find the hyphens. INSTR will help split the column. */
-
-
+SELECT *,
+CASE WHEN INSTR(product_name,'-') > 0
+			THEN LTRIM(RTRIM(SUBSTR(product_name,INSTR(product_name,'-')+1)))
+			ELSE NULL 
+END AS description
+FROM product
 
 /* 2. Filter the query to show any product_size value that contain a number with REGEXP. */
-
-
+SELECT *
+FROM product
+WHERE product_size REGEXP '[0-9]'
 
 -- UNION
 /* 1. Using a UNION, write a query that displays the market dates with the highest and lowest total sales.
@@ -72,9 +94,30 @@ HINT: There are a possibly a few ways to do this query, but if you're struggling
 "best day" and "worst day"; 
 3) Query the second temp table twice, once for the best day, once for the worst day, 
 with a UNION binding them. */
+CREATE TEMP TABLE market_sales AS
+SELECT 
+market_date,
+SUM(quantity * cost_to_customer_per_qty) AS total_cost
+FROM customer_purchases
+GROUP BY market_date;
 
+CREATE TEMP TABLE market_sales_rank AS
+SELECT 
+market_date,
+total_cost,
+RANK() OVER (ORDER BY total_cost) AS rank_asc,
+RANK() OVER (ORDER BY total_cost DESC) AS rank_desc
+FROM market_sales;
 
+SELECT market_date, total_cost, rank_desc AS sales_rank
+FROM market_sales_rank
+WHERE rank_asc = 1
 
+UNION
+
+SELECT market_date, total_cost, rank_desc AS sales_rank
+FROM market_sales_rank
+WHERE rank_desc = 1
 
 /* SECTION 3 */
 
@@ -88,28 +131,54 @@ Remember, CROSS JOIN will explode your table rows, so CROSS JOIN should likely b
 Think a bit about the row counts: how many distinct vendors, product names are there (x)?
 How many customers are there (y). 
 Before your final group by you should have the product of those two queries (x*y).  */
-
-
+SELECT vendor_name, product_name, sum(price_5x) AS total_income
+FROM (
+		SELECT DISTINCT
+		vendor_name,
+		product_name,
+		original_price * 5 AS price_5x
+		FROM vendor_inventory vi 
+		
+		JOIN vendor v on v.vendor_id = vi.vendor_id
+		JOIN product p on p.product_id = vi.product_id
+  ) x
+CROSS JOIN 
+(
+		SELECT DISTINCT 
+		customer_id
+		FROM customer
+  )
+GROUP BY vendor_name, product_name
 
 -- INSERT
 /*1.  Create a new table "product_units". 
 This table will contain only products where the `product_qty_type = 'unit'`. 
 It should use all of the columns from the product table, as well as a new column for the `CURRENT_TIMESTAMP`.  
 Name the timestamp column `snapshot_timestamp`. */
-
-
+CREATE TABLE product_units AS
+SELECT *,
+CURRENT_TIMESTAMP AS snapshot_timestamp
+FROM product 
+WHERE product_qty_type = "unit"
 
 /*2. Using `INSERT`, add a new row to the product_units table (with an updated timestamp). 
 This can be any product you desire (e.g. add another record for Apple Pie). */
-
-
+INSERT INTO product_units 
+SELECT *,
+CURRENT_TIMESTAMP
+FROM product 
+WHERE product_id = 7
 
 -- DELETE
 /* 1. Delete the older record for the whatever product you added. 
 
 HINT: If you don't specify a WHERE clause, you are going to have a bad time.*/
-
-
+DELETE FROM product_units
+WHERE product_id = 7
+AND snapshot_timestamp = 
+    (SELECT MIN(snapshot_timestamp) 
+    FROM product_units 
+    WHERE product_id = 7)
 
 -- UPDATE
 /* 1.We want to add the current_quantity to the product_units table. 
@@ -127,7 +196,27 @@ Third, SET current_quantity = (...your select statement...), remembering that WH
 Finally, make sure you have a WHERE statement to update the right row, 
 	you'll need to use product_units.product_id to refer to the correct row within the product_units table. 
 When you have all of these components, you can run the update statement. */
+ALTER TABLE product_units
+ADD current_quantity INT
 
-
-
+UPDATE product_units AS pu
+SET current_quantity = 
+(
+	SELECT current_quantity 
+	FROM 
+	(
+		SELECT pu.product_id, COALESCE(quantity,0) as current_quantity
+		FROM product_units 
+		LEFT JOIN 
+		(
+			SELECT *,
+			ROW_NUMBER() OVER( PARTITION BY vi.product_id ORDER BY market_date DESC) AS row_num
+			FROM vendor_inventory vi 
+		) vi_new
+		ON pu.product_id  = vi_new.product_id
+		WHERE row_num = 1 
+		OR row_num IS NULL
+	)x
+WHERE pu.product_id = x.product_id
+)
 
